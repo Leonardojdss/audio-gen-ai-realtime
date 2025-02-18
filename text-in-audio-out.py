@@ -17,7 +17,6 @@ api_key = os.getenv("AZURE_OPENAI_API_KEY")
 endpoint = os.getenv("AZURE_OPENAI_ENDPOINT")
 deployment = "gpt-4o-mini-realtime-preview"
 
-# Configurações que precisam ser compatíveis com o áudio recebido (ex: sample rate, channels, formato)
 SAMPLE_RATE = 16000  # exemplo, ajuste para sua configuração
 CHANNELS = 1         # exemplo, mono
 FORMAT = pyaudio.paInt16  # exemplo, 16-bit
@@ -28,7 +27,6 @@ stream = p.open(format=FORMAT,
                 rate=SAMPLE_RATE,
                 output=True)
 
-# Supondo que você esteja dentro de um loop onde recebe os bytes de áudio:
 def handle_audio_chunk(audio_chunk):
     try:
         if stream.is_active():
@@ -70,7 +68,6 @@ async def text_in_audio_out():
 
 async def main():
     await text_in_audio_out()
-    # Certifique-se de fechar o stream e terminar o PyAudio após o fim do processamento
     stream.stop_stream()
     stream.close()
     p.terminate()
