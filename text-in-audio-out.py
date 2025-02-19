@@ -39,13 +39,13 @@ def transcript_audio():
         audio = r.listen(source)
 
     try:
-        texto = r.recognize_google(audio, language="pt-BR")
-        print("You said: " + texto)
+        text = r.recognize_google(audio, language="pt-BR")
+        print("You said: " + text)
     except sr.UnknownValueError:
         print("Could not understand audio")
     except sr.RequestError as e:
         print("Could not request results; {0}".format(e))
-    return texto
+    return text
 
 def handle_audio_chunk(audio_chunk):
     stream = canal_audio()
