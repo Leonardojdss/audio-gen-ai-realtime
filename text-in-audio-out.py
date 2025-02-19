@@ -9,6 +9,10 @@ import sounddevice as sd
 from pydub import AudioSegment
 from azure.identity.aio import DefaultAzureCredential, get_bearer_token_provider
 from openai import AsyncAzureOpenAI
+from dotenv import load_dotenv
+import os
+
+load_dotenv()
 
 # Constants for audio processing
 CHUNK_LENGTH_S = 0.05  # 50ms
@@ -123,12 +127,14 @@ async def receive_audio_events(connection, player: AudioPlayerAsync):
             break
 
 async def main() -> None:
+    url_cognitiveservices = os.getenv("URL_COGNITIVESERVICES")
+    azure_endpoint = os.getenv("AZURE_OPENAI_ENDPOINT")
     # Initialize Azure credentials and the AsyncAzureOpenAI client
     credential = DefaultAzureCredential()
     client = AsyncAzureOpenAI(
-        azure_endpoint="https://leona-m4f35d8l-eastus2.openai.azure.com/",
+        azure_endpoint=azure_endpoint,
         azure_ad_token_provider=get_bearer_token_provider(
-            credential, "https://leona-m4f35d8l-eastus2.cognitiveservices.azure.com/"
+            credential, f"{url_cognitiveservices}"
         ),
         api_version="2024-10-01-preview",
     )
