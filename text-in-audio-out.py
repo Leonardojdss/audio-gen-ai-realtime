@@ -20,9 +20,9 @@ deployment = "gpt-4o-mini-realtime-preview"
 
 def canal_audio():
 # create canal of audio
-    SAMPLE_RATE = 10000 
+    SAMPLE_RATE = 30100 
     CHANNELS = 1        
-    FORMAT = pyaudio.paInt32
+    FORMAT = pyaudio.paInt16
 
     p = pyaudio.PyAudio()
     stream = p.open(format=FORMAT,
@@ -35,7 +35,7 @@ def transcript_audio():
     # Initialize the speech recognizer
     r = sr.Recognizer()
     with sr.Microphone() as source:
-        print("Speak your name:")
+        print("Speak your assistant realtime:")
         audio = r.listen(source)
 
     try:
