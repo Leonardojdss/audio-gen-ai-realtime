@@ -1,100 +1,156 @@
+from __future__ import annotations
+import io
 import base64
 import asyncio
-import pyaudio
-import speech_recognition as sr
-from azure.core.credentials import AzureKeyCredential
-from rtclient import (
-    ResponseCreateMessage,
-    RTLowLevelClient,
-    ResponseCreateParams
-)
-import os
-from dotenv import load_dotenv
+import threading
+from typing import Callable, Awaitable
+import numpy as np
+import sounddevice as sd
+from pydub import AudioSegment
+from azure.identity.aio import DefaultAzureCredential, get_bearer_token_provider
+from openai import AsyncAzureOpenAI
 
-load_dotenv()
+# Constants for audio processing
+CHUNK_LENGTH_S = 0.05  # 50ms
+SAMPLE_RATE = 24000
+CHANNELS = 1
 
-# Set environment variables or edit the corresponding values here.
-api_key = os.getenv("AZURE_OPENAI_API_KEY") 
-endpoint = os.getenv("AZURE_OPENAI_ENDPOINT")
-deployment = "gpt-4o-mini-realtime-preview"
+def audio_to_pcm16_base64(audio_bytes: bytes) -> bytes:
+    # Load audio using pydub and resample to 24kHz, mono, PCM16 format
+    audio = AudioSegment.from_file(io.BytesIO(audio_bytes))
+    pcm_audio = audio.set_frame_rate(SAMPLE_RATE).set_channels(CHANNELS).set_sample_width(2).raw_data
+    return pcm_audio
 
-def canal_audio():
-# create canal of audio
-    SAMPLE_RATE = 30100 
-    CHANNELS = 1        
-    FORMAT = pyaudio.paInt16
-
-    p = pyaudio.PyAudio()
-    stream = p.open(format=FORMAT,
-                    channels=CHANNELS,
-                    rate=SAMPLE_RATE,
-                    output=True)
-    return stream
-
-def transcript_audio():
-    # Initialize the speech recognizer
-    r = sr.Recognizer()
-    with sr.Microphone() as source:
-        print("Speak your assistant realtime:")
-        audio = r.listen(source)
-
-    try:
-        text = r.recognize_google(audio, language="pt-BR")
-        print("You said: " + text)
-    except sr.UnknownValueError:
-        print("Could not understand audio")
-    except sr.RequestError as e:
-        print("Could not request results; {0}".format(e))
-    return text
-
-def handle_audio_chunk(audio_chunk):
-    stream = canal_audio()
-    try:
-        if stream.is_active():
-            stream.write(audio_chunk)
-    except OSError as e:
-        print("erro in write on stream: ", e)
-
-async def text_in_audio_out(conversation):
-    async with RTLowLevelClient(
-        url=endpoint,
-        azure_deployment=deployment,
-        key_credential=AzureKeyCredential(api_key) 
-    ) as client:
-        await client.send(
-            ResponseCreateMessage(
-                response=ResponseCreateParams(
-                    modalities={"audio", "text"}, 
-                    instructions=f"{conversation}"
-                )
-            )
+class AudioPlayerAsync:
+    def __init__(self):
+        self.queue = []
+        self.lock = threading.Lock()
+        self.stream = sd.OutputStream(
+            callback=self.callback,
+            samplerate=SAMPLE_RATE,
+            channels=CHANNELS,
+            dtype=np.int16,
+            blocksize=int(CHUNK_LENGTH_S * SAMPLE_RATE),
         )
-        done = False
-        while not done:
-            message = await client.recv()
-            match message.type:
-                case "response.done":
-                    done = True
-                case "error":
-                    done = True
-                    print(message.error)
-                case "response.audio_transcript.delta":
-                    print(f"Received text delta: {message.delta}")
-                case "response.audio.delta":
-                    buffer = base64.b64decode(message.delta)
-                    print(f"Received {len(buffer)} bytes of audio data.")
-                    handle_audio_chunk(buffer)
-                case _:
-                    pass
+        self.playing = False
+        self._frame_count = 0
 
-async def main():
-    while True:
-        conversation = transcript_audio()
-        if conversation:
-            await text_in_audio_out(conversation)
-        else:
-            print("Please say something to start the conversation.")
+    def callback(self, outdata, frames, time, status):  # noqa
+        with self.lock:
+            data = np.empty(0, dtype=np.int16)
+            # Fill the output buffer using queued PCM data
+            while len(data) < frames and self.queue:
+                item = self.queue.pop(0)
+                frames_needed = frames - len(data)
+                data = np.concatenate((data, item[:frames_needed]))
+                if len(item) > frames_needed:
+                    self.queue.insert(0, item[frames_needed:])
+            self._frame_count += len(data)
+            # In case not enough data, pad with zeros
+            if len(data) < frames:
+                data = np.concatenate((data, np.zeros(frames - len(data), dtype=np.int16)))
+        outdata[:] = data.reshape(-1, 1)
+
+    def add_data(self, data: bytes):
+        with self.lock:
+            np_data = np.frombuffer(data, dtype=np.int16)
+            self.queue.append(np_data)
+            if not self.playing:
+                self.start()
+
+    def start(self):
+        self.playing = True
+        self.stream.start()
+
+    def stop(self):
+        self.playing = False
+        self.stream.stop()
+        with self.lock:
+            self.queue.clear()
+
+    def terminate(self):
+        self.stream.close()
+
+async def send_audio_worker_sounddevice(
+    connection,
+    should_send: Callable[[], bool] | None = None,
+    start_send: Callable[[], Awaitable[None]] | None = None,
+):
+    sent_audio = False
+    read_size = int(SAMPLE_RATE * 0.02)  # 20ms chunks
+    stream = sd.InputStream(
+        channels=CHANNELS,
+        samplerate=SAMPLE_RATE,
+        dtype="int16",
+    )
+    stream.start()
+    try:
+        while True:
+            if stream.read_available < read_size:
+                await asyncio.sleep(0.01)
+                continue
+            data, _ = stream.read(read_size)
+            if should_send() if should_send else True:
+                if not sent_audio and start_send:
+                    await start_send()
+                await connection.send({
+                    "type": "input_audio_buffer.append",
+                    "audio": base64.b64encode(data).decode("utf-8")
+                })
+                sent_audio = True
+            elif sent_audio:
+                print("Audio done, triggering inference")
+                await connection.send({"type": "input_audio_buffer.commit"})
+                await connection.send({"type": "response.create", "response": {}})
+                sent_audio = False
+            await asyncio.sleep(0.01)
+    except KeyboardInterrupt:
+        pass
+    finally:
+        stream.stop()
+        stream.close()
+
+async def receive_audio_events(connection, player: AudioPlayerAsync):
+    async for event in connection:
+        if event.type == "response.audio_transcript.delta":
+            print(f"Transcript: {event.delta}", flush=True)
+        elif event.type == "response.audio.delta":
+            # Decode incoming base64 audio delta and play it
+            buffer = base64.b64decode(event.delta)
+            print(f"Received {len(buffer)} bytes of audio data.")
+            player.add_data(buffer)
+        elif event.type == "response.done":
+            break
+
+async def main() -> None:
+    # Initialize Azure credentials and the AsyncAzureOpenAI client
+    credential = DefaultAzureCredential()
+    client = AsyncAzureOpenAI(
+        azure_endpoint="https://leona-m4f35d8l-eastus2.openai.azure.com/",
+        azure_ad_token_provider=get_bearer_token_provider(
+            credential, "https://leona-m4f35d8l-eastus2.cognitiveservices.azure.com/"
+        ),
+        api_version="2024-10-01-preview",
+    )
+    player = AudioPlayerAsync()
+    try:
+        while True:
+            async with client.beta.realtime.connect(
+                model="gpt-4o-realtime-preview",
+            ) as connection:
+                # Use both audio and text modalities
+                await connection.session.update(session={"modalities": ["audio", "text"]})
+                # Start the worker sending audio from sounddevice
+                send_task = asyncio.create_task(send_audio_worker_sounddevice(connection))
+                # Listen for incoming audio events and transcripts
+                await receive_audio_events(connection, player)
+                send_task.cancel()
+                print("Reiniciando o chat de voz...")
+    except KeyboardInterrupt:
+        print("Encerrando o chat de voz.")
+    finally:
+        player.terminate()
+        await credential.close()
 
 if __name__ == "__main__":
-    import asyncio
     asyncio.run(main())

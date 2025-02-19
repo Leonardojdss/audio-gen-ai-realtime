@@ -171,3 +171,6 @@ cython_debug/
 
 # PyPI configuration file
 .pypirc
+
+text-in-audio-out_old.py
+text-in-audio-out_old_2.py
