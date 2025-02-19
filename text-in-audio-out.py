@@ -1,6 +1,7 @@
 import base64
 import asyncio
 import pyaudio
+import speech_recognition as sr
 from azure.core.credentials import AzureKeyCredential
 from rtclient import (
     ResponseCreateMessage,
@@ -17,24 +18,44 @@ api_key = os.getenv("AZURE_OPENAI_API_KEY")
 endpoint = os.getenv("AZURE_OPENAI_ENDPOINT")
 deployment = "gpt-4o-mini-realtime-preview"
 
-SAMPLE_RATE = 16000  # exemplo, ajuste para sua configuração
-CHANNELS = 1         # exemplo, mono
-FORMAT = pyaudio.paInt16  # exemplo, 16-bit
+def canal_audio():
+# create canal of audio
+    SAMPLE_RATE = 10000 
+    CHANNELS = 1        
+    FORMAT = pyaudio.paInt32
 
-p = pyaudio.PyAudio()
-stream = p.open(format=FORMAT,
-                channels=CHANNELS,
-                rate=SAMPLE_RATE,
-                output=True)
+    p = pyaudio.PyAudio()
+    stream = p.open(format=FORMAT,
+                    channels=CHANNELS,
+                    rate=SAMPLE_RATE,
+                    output=True)
+    return stream
+
+def transcript_audio():
+    # Initialize the speech recognizer
+    r = sr.Recognizer()
+    with sr.Microphone() as source:
+        print("Speak your name:")
+        audio = r.listen(source)
+
+    try:
+        texto = r.recognize_google(audio, language="pt-BR")
+        print("You said: " + texto)
+    except sr.UnknownValueError:
+        print("Could not understand audio")
+    except sr.RequestError as e:
+        print("Could not request results; {0}".format(e))
+    return texto
 
 def handle_audio_chunk(audio_chunk):
+    stream = canal_audio()
     try:
         if stream.is_active():
             stream.write(audio_chunk)
     except OSError as e:
-        print("Erro ao escrever no stream: ", e)
+        print("erro in write on stream: ", e)
 
-async def text_in_audio_out():
+async def text_in_audio_out(conversation):
     async with RTLowLevelClient(
         url=endpoint,
         azure_deployment=deployment,
@@ -44,7 +65,7 @@ async def text_in_audio_out():
             ResponseCreateMessage(
                 response=ResponseCreateParams(
                     modalities={"audio", "text"}, 
-                    instructions="Please assist the user."
+                    instructions=f"{conversation}"
                 )
             )
         )
@@ -67,10 +88,12 @@ async def text_in_audio_out():
                     pass
 
 async def main():
-    await text_in_audio_out()
-    stream.stop_stream()
-    stream.close()
-    p.terminate()
+    while True:
+        conversation = transcript_audio()
+        if conversation:
+            await text_in_audio_out(conversation)
+        else:
+            print("Please say something to start the conversation.")
 
 if __name__ == "__main__":
     import asyncio
