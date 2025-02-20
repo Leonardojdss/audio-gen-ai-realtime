@@ -151,9 +151,9 @@ async def main() -> None:
                 # Listen for incoming audio events and transcripts
                 await receive_audio_events(connection, player)
                 send_task.cancel()
-                print("Reiniciando o chat de voz...")
+                print("Reload chat of speak...")
     except KeyboardInterrupt:
-        print("Encerrando o chat de voz.")
+        print("Ending chat of speak.")
     finally:
         player.terminate()
         await credential.close()
